@@ -138,6 +138,9 @@ def main() -> None:
     current_ids = {p["place_id"] for p in current if "place_id" in p}
     known_ids = load_known_ids()
 
+    print(f"Restaurantes encontrados hoy: {len(current_ids)}")
+    print(f"Restaurantes conocidos (state.json): {len(known_ids)}")
+
     new_ids = current_ids - known_ids
     if new_ids and known_ids:  # known_ids vacío = primera ejecución, no avisar de "todos"
         new_places = [p for p in current if p["place_id"] in new_ids]

@@ -25,22 +25,51 @@ from email.mime.text import MIMEText
 import requests
 
 STATE_FILE = "state.json"
+ZONES_STATE_FILE = "known_zones.json"
 NEARBY_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
 
-# Cuadrícula de puntos (lat, lon, radio_metros) que cubre el área urbana de
-# Valencia. Los radios se solapan ligeramente entre puntos vecinos para no
-# dejar huecos. Ajusta/añade puntos si quieres más o menos cobertura.
+# Cuadrícula de puntos (lat, lon, radio_metros) que cubre el área URBANA REAL
+# de Valencia (los 19 distritos con densidad relevante de restaurantes; se
+# excluyen las pedanías rurales del extremo norte/sur como Borbotó, Carpesa,
+# El Saler o El Palmar, de muy baja densidad).
+#
+# Radios más pequeños en las zonas de más densidad de restaurantes
+# (Ciutat Vella, Ruzafa, Eixample) para minimizar el riesgo de tocar el
+# límite de 60 resultados de la API; radios más grandes en zonas más
+# residenciales/periféricas.
 GRID_POINTS = [
-    {"label": "Zona 1 (Noroeste)",  "lat": 39.4880, "lon": -0.4050, "radius": 1300},
-    {"label": "Zona 2 (Norte)",     "lat": 39.4880, "lon": -0.3750, "radius": 1300},
-    {"label": "Zona 3 (Noreste)",   "lat": 39.4880, "lon": -0.3450, "radius": 1300},
-    {"label": "Zona 4 (Oeste)",     "lat": 39.4730, "lon": -0.4050, "radius": 1300},
-    {"label": "Zona 5 (Centro)",    "lat": 39.4730, "lon": -0.3750, "radius": 1300},
-    {"label": "Zona 6 (Este)",      "lat": 39.4730, "lon": -0.3450, "radius": 1300},
-    {"label": "Zona 7 (Suroeste)",  "lat": 39.4580, "lon": -0.4050, "radius": 1300},
-    {"label": "Zona 8 (Sur)",       "lat": 39.4580, "lon": -0.3750, "radius": 1300},
-    {"label": "Zona 9 (Sureste)",   "lat": 39.4580, "lon": -0.3450, "radius": 1300},
+    # --- Núcleo denso (radio pequeño) ---
+    {"label": "Ciutat Vella",           "lat": 39.4746, "lon": -0.3762, "radius": 700},
+    {"label": "Ruzafa",                 "lat": 39.4629, "lon": -0.3729, "radius": 700},
+    {"label": "Eixample / Gran Via",    "lat": 39.4660, "lon": -0.3660, "radius": 700},
+    {"label": "Extramurs / El Carme",   "lat": 39.4720, "lon": -0.3850, "radius": 800},
+    {"label": "Pla del Remei",          "lat": 39.4700, "lon": -0.3700, "radius": 700},
+
+    # --- Densidad media ---
+    {"label": "Benimaclet / Camí Vera", "lat": 39.4830, "lon": -0.3550, "radius": 1000},
+    {"label": "Algirós",                "lat": 39.4800, "lon": -0.3620, "radius": 1000},
+    {"label": "Malilla / Fuente S.Luis","lat": 39.4520, "lon": -0.3700, "radius": 1000},
+    {"label": "Jesús",                  "lat": 39.4550, "lon": -0.3830, "radius": 1000},
+    {"label": "Patraix",                "lat": 39.4570, "lon": -0.4000, "radius": 1000},
+    {"label": "Campanar",               "lat": 39.4790, "lon": -0.4020, "radius": 1000},
+    {"label": "Rascanya / Torrefiel",   "lat": 39.4930, "lon": -0.3800, "radius": 1100},
+
+    # --- Poblados Marítimos (playa/puerto) — antes fuera de la cuadrícula ---
+    {"label": "Cabanyal / Malvarrosa",  "lat": 39.4700, "lon": -0.3280, "radius": 1000},
+    {"label": "El Grao / Puerto",       "lat": 39.4570, "lon": -0.3260, "radius": 1000},
+
+    # --- Sur (Ciudad de las Artes, Quatre Carreres) — antes fuera de la cuadrícula ---
+    {"label": "Quatre Carreres / CAC",  "lat": 39.4550, "lon": -0.3550, "radius": 1200},
+    {"label": "Poblados del Sur",       "lat": 39.4380, "lon": -0.3680, "radius": 1500},
+
+    # --- Oeste (Nou Moles, Benicalap) ---
+    {"label": "Poblados del Oeste",     "lat": 39.4600, "lon": -0.4150, "radius": 1200},
+    {"label": "Benicalap",              "lat": 39.4920, "lon": -0.3920, "radius": 1200},
 ]
+
+# Umbral a partir del cual avisamos de que una zona probablemente está
+# tocando el límite de 60 resultados de la API (y por tanto perdiendo datos).
+CAP_WARNING_THRESHOLD = 55
 
 
 def fetch_grid_point(api_key: str, point: dict) -> list[dict]:
@@ -73,6 +102,14 @@ def fetch_grid_point(api_key: str, point: dict) -> list[dict]:
         if not next_token:
             break
 
+    if len(results) >= CAP_WARNING_THRESHOLD:
+        print(
+            f"[AVISO] '{point['label']}' devolvió {len(results)} resultados "
+            f"(cerca del límite de 60 de Google) — probablemente se están "
+            f"perdiendo restaurantes en esta zona. Considera reducir el radio "
+            f"o añadir más puntos aquí."
+        )
+
     return results
 
 
@@ -99,6 +136,18 @@ def load_known_ids() -> set[str]:
 def save_known_ids(ids: set[str]) -> None:
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(ids), f, ensure_ascii=False, indent=2)
+
+
+def load_known_zones() -> set[str]:
+    if os.path.exists(ZONES_STATE_FILE):
+        with open(ZONES_STATE_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_known_zones(zones: set[str]) -> None:
+    with open(ZONES_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(sorted(zones), f, ensure_ascii=False, indent=2)
 
 
 def send_email(new_places: list[dict]) -> None:
@@ -138,21 +187,47 @@ def main() -> None:
     current_ids = {p["place_id"] for p in current if "place_id" in p}
     known_ids = load_known_ids()
 
+    current_zones = {p["label"] for p in GRID_POINTS}
+    known_zones = load_known_zones()
+    # Zonas que se han añadido a la cuadrícula desde la última ejecución.
+    # known_zones vacío = o bien es la primerísima vez que corre el bot, o
+    # bien viene de antes de que existiera este archivo: en ese caso no
+    # sabemos qué zonas ya se cubrían, así que no tratamos ninguna como
+    # "nueva" (evita falsos positivos de silenciado).
+    new_zones = current_zones - known_zones if known_zones else set()
+
     print(f"Restaurantes encontrados hoy: {len(current_ids)}")
     print(f"Restaurantes conocidos (state.json): {len(known_ids)}")
+    if new_zones:
+        print(f"Zonas nuevas en la cuadrícula esta vez: {sorted(new_zones)}")
 
     new_ids = current_ids - known_ids
     if new_ids and known_ids:  # known_ids vacío = primera ejecución, no avisar de "todos"
         new_places = [p for p in current if p["place_id"] in new_ids]
-        print(f"Encontrados {len(new_places)} restaurantes nuevos. Enviando email...")
-        try:
-            send_email(new_places)
-        except Exception as e:
-            print(f"Error al enviar email: {e}", file=sys.stderr)
+
+        if new_zones:
+            de_zonas_nuevas = [p for p in new_places if p.get("_zone") in new_zones]
+            new_places = [p for p in new_places if p.get("_zone") not in new_zones]
+            if de_zonas_nuevas:
+                print(
+                    f"{len(de_zonas_nuevas)} restaurantes encontrados solo porque "
+                    f"su zona es nueva en la cuadrícula (no son aperturas reales, "
+                    f"no se avisa por email; se guardan igualmente en state.json)."
+                )
+
+        if new_places:
+            print(f"Encontrados {len(new_places)} restaurantes nuevos. Enviando email...")
+            try:
+                send_email(new_places)
+            except Exception as e:
+                print(f"Error al enviar email: {e}", file=sys.stderr)
+        else:
+            print("Sin restaurantes genuinamente nuevos.")
     else:
         print("Sin novedades.")
 
     save_known_ids(current_ids)
+    save_known_zones(current_zones)
 
 
 if __name__ == "__main__":
